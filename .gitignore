@@ -1,0 +1,4 @@
+*.exe
+*.flp.out
+/dist/
+*.test
