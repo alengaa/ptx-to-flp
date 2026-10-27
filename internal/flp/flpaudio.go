@@ -1,10 +1,12 @@
-package main
+package flp
 
 // Builds an FLP that contains the tempo (+ automation) and audio clips placed on
 // playlist lines. Audio-clip structures are copied from a project saved by FL Studio
 // 26.1.6 (audio_base.flp); only the clip positions, sources, names and pan are patched.
 
 import (
+	"github.com/alengaa/ptx-to-flp/internal/ptx"
+
 	_ "embed"
 	"encoding/binary"
 	"errors"
@@ -17,7 +19,7 @@ import (
 	"unicode/utf16"
 )
 
-//go:embed audio_base.flp
+//go:embed assets/audio_base.flp
 var flpAudioBase []byte
 
 type flEv struct {
@@ -108,7 +110,7 @@ type tempoMap struct {
 	beat, bpm, time []float64 // segment start (beats), tempo, cumulative seconds at start
 }
 
-func newTempoMap(ev []TempoEvent) tempoMap {
+func newTempoMap(ev []ptx.TempoEvent) tempoMap {
 	var m tempoMap
 	add := func(b, bpm float64) {
 		t := 0.0
@@ -165,7 +167,7 @@ var sideRe = regexp.MustCompile(`(?i)(?:^|[\s._\-(\[])([lr])[)\]]?$`)
 // lineSides decides hard-pan sides for the selected lines: two consecutive lines with
 // the same track label are a split-stereo pair (first = left); otherwise a trailing
 // L / R in the name decides; anything else stays centered.
-func lineSides(lines []AudioLine) []int {
+func lineSides(lines []ptx.AudioLine) []int {
 	sides := make([]int, len(lines))
 	for i := range sides {
 		sides[i] = panCenter
@@ -191,13 +193,16 @@ func lineSides(lines []AudioLine) []int {
 
 // BuildOptions controls BuildFLPFull.
 type BuildOptions struct {
-	Events   []TempoEvent // tempo events as read from the PTX (not shifted)
-	StartBar int          // song starts at this bar (1 = session start)
-	Audio    *PTXAudio    // nil = no audio
-	Lines    int          // number of lines with content to use; <=0 = all
-	AudioDir string       // folder holding the session's audio files
+	Events   []ptx.TempoEvent // tempo events as read from the PTX (not shifted)
+	StartBar int              // song starts at this bar (1 = session start)
+	Audio    *ptx.PTXAudio    // nil = no audio
+	Lines    int              // lines with content to use: >0 first N, 0 = all, <0 none
+	AudioDir string           // folder holding the session's audio files
 	// PathFor, if set, can replace the sample path written for the clip on line index li.
 	PathFor func(li int, found string) string
+	// RecoverTakes also places the session's unplaced regions (see ptx.PTXAudio.Unplaced) on
+	// extra lines below the regular audio, at their stored positions. Best guess only.
+	RecoverTakes bool
 }
 
 type plItem struct {
@@ -288,8 +293,17 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 
 	// select lines
 	lines := o.Audio.Lines
-	if o.Lines > 0 && o.Lines < len(lines) {
+	if o.Lines < 0 { // takes only
+		lines = nil
+	} else if o.Lines > 0 && o.Lines < len(lines) {
 		lines = lines[:o.Lines]
+	}
+	lines = append([]ptx.AudioLine{}, lines...)
+	nRegular := len(lines)
+	if o.RecoverTakes {
+		for i, lane := range ptx.PackLanes(o.Audio.Unplaced) {
+			lines = append(lines, ptx.AudioLine{Name: fmt.Sprintf("Recovered takes %d", i+1), Clips: lane})
+		}
 	}
 	sides := lineSides(lines)
 	sr := float64(o.Audio.SampleRate)
@@ -315,7 +329,7 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 				noFile++
 				continue
 			}
-			path := FindAudioFile(o.AudioDir, c.File)
+			path := ptx.FindAudioFile(o.AudioDir, c.File)
 			if path == "" {
 				missing++
 				path = filepath.Join(o.AudioDir, strings.TrimSpace(filepath.Base(strings.ReplaceAll(c.File, "\\", "/"))))
@@ -419,6 +433,9 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 		binary.LittleEndian.PutUint32(evs[ti].data, uint32(math.Round(bpm*1000)))
 	}
 
+	if o.RecoverTakes {
+		fmt.Fprintf(&report, "  Recovered %d unplaced takes on %d extra lines (best-guess positions)\n", len(o.Audio.Unplaced), len(lines)-nRegular)
+	}
 	fmt.Fprintf(&report, "  %d audio clips on %d lines, %d sample channels\n", len(items), len(lines), len(chanOrder))
 	if skippedEarly > 0 {
 		fmt.Fprintf(&report, "  %d clips end before the song start and were skipped\n", skippedEarly)

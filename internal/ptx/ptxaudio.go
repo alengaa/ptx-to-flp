@@ -1,4 +1,4 @@
-package main
+package ptx
 
 // Audio track / clip reader for Pro Tools sessions.
 //
@@ -152,6 +152,12 @@ type PTXAudio struct {
 	EmptyLines int
 	// OverlapsTrimmed counts clips shortened, split or removed because a later clip covers them.
 	OverlapsTrimmed int
+	// Unplaced are regions that exist in the session's clip list (typically takes that were
+	// deleted from the timeline) with the position stored in the region itself. The position
+	// is a best guess of where the take was recorded, not a placement.
+	Unplaced []AudioClip
+	// OriginSamples is the session timecode origin (e.g. 01:00:00:00) that region starts include.
+	OriginSamples int64
 }
 
 // resolveOverlaps makes the clips of one line non-overlapping, like a Pro Tools playlist
@@ -343,6 +349,25 @@ func sessionSampleRate(d []byte, top []*pblock) int {
 	return sr
 }
 
+// sessionOriginSamples reads the session's timecode origin (0x204D block): the offset that
+// absolute region starts include. Only the 25 fps frame-rate code is verified; for any
+// other code with a non-zero origin it returns 0.
+func sessionOriginSamples(d []byte, top []*pblock, sr int) int64 {
+	bs := findByCT(top, 0x204D)
+	if len(bs) != 1 {
+		return 0
+	}
+	p := bs[0].off
+	if p+15 > len(d) {
+		return 0
+	}
+	frames := int64(rd4(d, p+11))
+	if frames == 0 || rd4(d, p+2) != 0x02 {
+		return 0
+	}
+	return frames * int64(sr) / 25
+}
+
 // ReadPTXAudio extracts the audio lines (mono channels) that hold active clips.
 func ReadPTXAudio(path string) (*PTXAudio, error) {
 	raw, err := os.ReadFile(path)
@@ -393,6 +418,7 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 		}
 	}
 
+	usedRegion := map[int]bool{}
 	for _, m := range maps {
 		count := 0
 		for _, e := range m.kids {
@@ -468,10 +494,70 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 			break // the first map with content is the real one
 		}
 	}
-	if len(res.Lines) == 0 {
+	res.OriginSamples = sessionOriginSamples(d, top, res.SampleRate)
+	res.Unplaced = findUnplaced(regs, files, usedRegion, res)
+	if len(res.Lines) == 0 && len(res.Unplaced) == 0 {
 		return res, errors.New("no audio clips found on the timeline")
 	}
 	return res, nil
+}
+
+// findUnplaced lists regions that no playlist references, whose media file is not used by
+// any placed clip (that excludes the whole-file regions of the placed material), positioned
+// by their stored start minus the session origin.
+func findUnplaced(regs []ptRegion, files []string, used map[int]bool, res *PTXAudio) []AudioClip {
+	placedFile := map[string]bool{}
+	for _, l := range res.Lines {
+		for _, c := range l.Clips {
+			placedFile[c.File] = true
+		}
+	}
+	var out []AudioClip
+	seen := map[[3]int64]bool{}
+	for _, r := range regs {
+		if used[r.index] || r.fileIndex < 0 || r.fileIndex >= len(files) {
+			continue
+		}
+		f := files[r.fileIndex]
+		if f == "" || placedFile[f] || r.start <= 0 {
+			continue
+		}
+		pos := r.start
+		if pos >= res.OriginSamples {
+			pos -= res.OriginSamples
+		}
+		key := [3]int64{int64(r.fileIndex), pos, r.length}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, AudioClip{RegionName: r.name, File: f, Start: pos, Length: r.length, SrcOffset: r.srcOffset})
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Start < out[b].Start })
+	return out
+}
+
+// PackLanes spreads clips over as few non-overlapping lanes as possible (first fit, clips
+// sorted by Start), so overlapping takes are all kept instead of covering one another.
+func PackLanes(clips []AudioClip) [][]AudioClip {
+	var lanes [][]AudioClip
+	var ends []int64
+	for _, c := range clips {
+		placed := false
+		for i := range lanes {
+			if ends[i] <= c.Start {
+				lanes[i] = append(lanes[i], c)
+				ends[i] = c.Start + c.Length
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			lanes = append(lanes, []AudioClip{c})
+			ends = append(ends, c.Start+c.Length)
+		}
+	}
+	return lanes
 }
 
 // FindAudioFile looks for a media file by name inside dir (case-insensitive,

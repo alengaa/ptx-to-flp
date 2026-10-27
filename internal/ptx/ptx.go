@@ -1,4 +1,4 @@
-package main
+package ptx
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 // zeroTicks. One beat (quarter note) is 960000 ticks.
 const (
 	zeroTicks    = 0xE8D4A51000
-	ticksPerBeat = 960000
+	TicksPerBeat = 960000
 	minBPM       = 5.0
 	maxBPM       = 1000.0
 )
@@ -29,7 +29,7 @@ type TempoEvent struct {
 }
 
 // Beats returns the position in beats (quarter notes) from the session start.
-func (e TempoEvent) Beats() float64 { return float64(e.Ticks) / ticksPerBeat }
+func (e TempoEvent) Beats() float64 { return float64(e.Ticks) / TicksPerBeat }
 
 // Result is what ExtractTempo returns.
 type Result struct {
@@ -169,13 +169,13 @@ func ExtractTempo(path string) (*Result, error) {
 	return res, nil
 }
 
-func formatBPM(v float64) string {
+func FormatBPM(v float64) string {
 	s := strconv.FormatFloat(math.Round(v*10000)/10000, 'f', 4, 64)
 	s = strings.TrimRight(s, "0")
 	return strings.TrimSuffix(s, ".")
 }
 
-func formatClock(sec float64) string {
+func FormatClock(sec float64) string {
 	ms := int64(math.Round(sec * 1000))
 	return fmt.Sprintf("%d:%02d.%03d", ms/60000, (ms/1000)%60, ms%1000)
 }
@@ -204,7 +204,7 @@ func (r *Result) Format() string {
 		maxB = math.Max(maxB, e.BPM)
 	}
 
-	fmt.Fprintf(&sb, "Project tempo: %s BPM", formatBPM(first.BPM))
+	fmt.Fprintf(&sb, "Project tempo: %s BPM", FormatBPM(first.BPM))
 	if first.Ticks != 0 {
 		sb.WriteString("  (first tempo event is not at the very start of the session)")
 	}
@@ -219,7 +219,7 @@ func (r *Result) Format() string {
 	}
 
 	fmt.Fprintf(&sb, "Tempo automation: YES - %d tempo events, %s to %s BPM\n\n",
-		len(r.Events), formatBPM(minB), formatBPM(maxB))
+		len(r.Events), FormatBPM(minB), FormatBPM(maxB))
 
 	fmt.Fprintf(&sb, "%5s  %-11s  %10s  %-10s  %s\n", "#", "Bar|Beat*", "Beats", "Time", "BPM")
 	t := 0.0
@@ -234,7 +234,7 @@ func (r *Result) Format() string {
 		bar := int(math.Floor(beats/4)) + 1
 		beatInBar := math.Mod(beats, 4) + 1
 		fmt.Fprintf(&sb, "%5d  %-11s  %10.3f  %-10s  %s\n", i+1,
-			fmt.Sprintf("%d|%.3f", bar, beatInBar), beats, formatClock(t), formatBPM(e.BPM))
+			fmt.Sprintf("%d|%.3f", bar, beatInBar), beats, FormatClock(t), FormatBPM(e.BPM))
 		prev = e
 	}
 	sb.WriteString("\n* Bar|Beat assumes 4/4 throughout. Beats = quarter notes from session start.\n")

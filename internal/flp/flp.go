@@ -1,6 +1,8 @@
-package main
+package flp
 
 import (
+	"github.com/alengaa/ptx-to-flp/internal/ptx"
+
 	_ "embed"
 	"encoding/binary"
 	"errors"
@@ -70,7 +72,7 @@ func BuildFLP(bpm float64) []byte {
 // that contains one automation clip linked to the project Tempo control. Only the
 // tempo, the clip's points, its min/max range and its playlist length are patched.
 
-//go:embed template.flp
+//go:embed assets/template.flp
 var flpTemplate []byte
 
 const (
@@ -98,21 +100,21 @@ const pointKind = 0x02000000
 // ShiftToStart makes the song begin at the given 1-based bar (4/4): events before
 // it are dropped, the tempo in effect there becomes the first event at position 0,
 // and later events move earlier by that many bars.
-func ShiftToStart(events []TempoEvent, startBar int) []TempoEvent {
+func ShiftToStart(events []ptx.TempoEvent, startBar int) []ptx.TempoEvent {
 	if startBar <= 1 || len(events) == 0 {
 		return events
 	}
-	cut := uint64(startBar-1) * 4 * ticksPerBeat
+	cut := uint64(startBar-1) * 4 * ptx.TicksPerBeat
 	cur := events[0].BPM
-	var out []TempoEvent
+	var out []ptx.TempoEvent
 	for _, e := range events {
 		if e.Ticks <= cut {
 			cur = e.BPM
 			continue
 		}
-		out = append(out, TempoEvent{Ticks: e.Ticks - cut, BPM: e.BPM})
+		out = append(out, ptx.TempoEvent{Ticks: e.Ticks - cut, BPM: e.BPM})
 	}
-	return append([]TempoEvent{{Ticks: 0, BPM: cur}}, out...)
+	return append([]ptx.TempoEvent{{Ticks: 0, BPM: cur}}, out...)
 }
 
 func varLen(n int) []byte {
@@ -154,7 +156,7 @@ type AutomationPlan struct {
 }
 
 // PlanAutomation turns tempo events into automation points (step changes).
-func PlanAutomation(events []TempoEvent) AutomationPlan {
+func PlanAutomation(events []ptx.TempoEvent) AutomationPlan {
 	minB, maxB := events[0].BPM, events[0].BPM
 	for _, e := range events {
 		minB = math.Min(minB, e.BPM)
@@ -185,7 +187,7 @@ func PlanAutomation(events []TempoEvent) AutomationPlan {
 
 // BuildFLPWithAutomation creates a project with the first tempo as project tempo
 // plus an automation clip (playlist track 1, from bar 1) linked to Tempo.
-func BuildFLPWithAutomation(events []TempoEvent) ([]byte, AutomationPlan, error) {
+func BuildFLPWithAutomation(events []ptx.TempoEvent) ([]byte, AutomationPlan, error) {
 	t := flpTemplate
 	if len(t) < tplAutoOff+tplAutoHdr+tplAutoLen || t[tplTempoOff] != 156 || t[tplLevelsOff] != 219 ||
 		t[tplPlaylistOff] != 233 || t[tplLinkOff] != 216 || t[tplAutoOff] != 234 {

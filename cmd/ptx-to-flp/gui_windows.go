@@ -3,6 +3,9 @@
 package main
 
 import (
+	"github.com/alengaa/ptx-to-flp/internal/flp"
+	"github.com/alengaa/ptx-to-flp/internal/ptx"
+
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,6 +118,7 @@ const (
 	idBar     = 105
 	idLines   = 106
 	idAll     = 107
+	idRecover = 108
 )
 
 type point struct{ x, y int32 }
@@ -173,9 +177,9 @@ type openFileName struct {
 }
 
 var (
-	hMain, hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hUp, hAll, hResult uintptr
-	uiFont, monoFont                                                                                    uintptr
-	dpi                                                                                                 = 96
+	hMain, hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hUp, hAll, hRecover, hResult uintptr
+	uiFont, monoFont                                                                                              uintptr
+	dpi                                                                                                           = 96
 )
 
 func scale(v int) int { return v * dpi / 96 }
@@ -216,6 +220,7 @@ func createControls(hwnd uintptr) {
 	hLinesLbl = createChild("STATIC", "Audio lines (0 = none):", 0, 0, 0)
 	hLines = createChild("EDIT", "2", wsTabStop|esAutoHScroll|esNumber, wsExClientEdge, idLines)
 	hAll = createChild("BUTTON", "All lines", wsTabStop|bsCheckbox, 0, idAll)
+	hRecover = createChild("BUTTON", "Also recover unplaced takes (best guess)", wsTabStop|bsCheckbox, 0, idRecover)
 	initCommonControls()
 	hUp = createChild("msctls_updown32", "", 0x0002|0x0004|0x0020|0x0080, 0, 0) // buddy int, align right, arrow keys, no thousands
 	if hUp != 0 {
@@ -225,7 +230,7 @@ func createControls(hwnd uintptr) {
 	}
 	hResult = createChild("EDIT", "", wsTabStop|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, wsExClientEdge, idResult)
 
-	for _, h := range []uintptr{hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hAll} {
+	for _, h := range []uintptr{hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hAll, hRecover} {
 		setFont(h, uiFont)
 	}
 	setFont(hResult, monoFont)
@@ -264,7 +269,9 @@ func layout() {
 		pSendMessageW.Call(hUp, 0x0469, hLines, 0) // re-attach so the arrows follow the box
 	}
 	move(hAll, m+scale(154)+scale(60)+scale(24), y+scale(3), scale(110), scale(24))
-	y += scale(26) + scale(12)
+	y += scale(26) + scale(6)
+	move(hRecover, m, y, scale(340), scale(24))
+	y += scale(24) + scale(10)
 	rh := h - y - m
 	if rh < scale(40) {
 		rh = scale(40)
@@ -313,7 +320,7 @@ func runExtract(path string) (out string) {
 	if path == "" {
 		return "Choose a .ptx file first."
 	}
-	res, err := ExtractTempo(path)
+	res, err := ptx.ExtractTempo(path)
 	if err != nil {
 		return "Could not read the file:\n" + err.Error()
 	}
@@ -325,7 +332,7 @@ func extract() {
 	out := runExtract(getText(hEdit))
 	if p := strings.Trim(strings.TrimSpace(getText(hEdit)), "\""); p != "" && !strings.HasPrefix(out, "Could not") {
 		n, all := audioLineSetting()
-		out += audioSummary(p, n, all)
+		out += audioSummary(p, n, all, recoverChecked())
 	}
 	setText(hResult, out)
 }
@@ -377,6 +384,11 @@ func audioLineSetting() (int, bool) {
 	return n, false
 }
 
+func recoverChecked() bool {
+	c, _, _ := pSendMessageW.Call(hRecover, bmGetCheck, 0, 0)
+	return c == 1
+}
+
 func setLinesEnabled() {
 	on := uintptr(1)
 	if c, _, _ := pSendMessageW.Call(hAll, bmGetCheck, 0, 0); c == 1 {
@@ -389,11 +401,11 @@ func setLinesEnabled() {
 }
 
 // audioSummary lists the audio lines that would be copied.
-func audioSummary(path string, n int, all bool) string {
-	if n == 0 && !all {
+func audioSummary(path string, n int, all, recover bool) string {
+	if n == 0 && !all && !recover {
 		return ""
 	}
-	au, err := ReadPTXAudio(path)
+	au, err := ptx.ReadPTXAudio(path)
 	if err != nil {
 		return "\nAudio: " + err.Error() + "\n"
 	}
@@ -401,11 +413,22 @@ func audioSummary(path string, n int, all bool) string {
 	if !all && n < len(lines) {
 		lines = lines[:n]
 	}
+	if n == 0 && !all {
+		lines = nil
+	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\nAudio lines with clips: %d found in the session, %d selected\n", len(au.Lines), len(lines))
+	if len(lines) > 0 || len(au.Unplaced) == 0 {
+		fmt.Fprintf(&sb, "\nAudio lines with clips: %d found in the session, %d selected\n", len(au.Lines), len(lines))
+	} else {
+		sb.WriteString("\n")
+	}
 	for i, l := range lines {
 		first := float64(l.Clips[0].Start) / float64(au.SampleRate)
-		fmt.Fprintf(&sb, "  line %d: %s  (%d clips, first at %s)\n", i+1, l.Name, len(l.Clips), formatClock(first))
+		fmt.Fprintf(&sb, "  line %d: %s  (%d clips, first at %s)\n", i+1, l.Name, len(l.Clips), ptx.FormatClock(first))
+	}
+	if len(au.Unplaced) > 0 {
+		fmt.Fprintf(&sb, "Unplaced takes in the clip list (not on the timeline): %d, would use %d extra lines if recovered\n",
+			len(au.Unplaced), len(ptx.PackLanes(au.Unplaced)))
 	}
 	return sb.String()
 }
@@ -416,7 +439,7 @@ func createFLP() {
 		setText(hResult, "Choose a .ptx file first.")
 		return
 	}
-	res, err := ExtractTempo(path)
+	res, err := ptx.ExtractTempo(path)
 	if err != nil {
 		setText(hResult, "Could not read the file:\n"+err.Error())
 		return
@@ -453,40 +476,45 @@ func createFLP() {
 	if n, err := strconv.Atoi(strings.TrimSpace(getText(hBar))); err == nil && n >= 1 {
 		startBar = n
 	}
-	events := ShiftToStart(res.Events, startBar)
+	events := flp.ShiftToStart(res.Events, startBar)
 	distinct := false
 	for _, e := range events {
 		if e.BPM != events[0].BPM {
 			distinct = true
 		}
 	}
-	bpm, clamped := ClampFLTempo(events[0].BPM)
+	bpm, clamped := flp.ClampFLTempo(events[0].BPM)
 
 	// audio (optional)
-	opts := BuildOptions{Events: res.Events, StartBar: startBar}
+	opts := flp.BuildOptions{Events: res.Events, StartBar: startBar}
 	audioNote := ""
 	nLines, allLines := audioLineSetting()
-	if nLines > 0 || allLines {
+	recover := recoverChecked()
+	if nLines > 0 || allLines || recover {
 		dir := filepath.Join(filepath.Dir(path), "Audio Files")
 		if st, e := os.Stat(dir); e != nil || !st.IsDir() {
 			dir = pickFolder("Audio Files folder not found next to the .ptx. Select the session's Audio Files folder:")
 		}
 		if dir == "" {
 			audioNote = "Audio not added: no Audio Files folder selected.\n"
-		} else if au, e := ReadPTXAudio(path); e != nil {
+		} else if au, e := ptx.ReadPTXAudio(path); e != nil {
 			audioNote = "Audio not added: " + e.Error() + "\n"
 		} else {
 			opts.Audio, opts.AudioDir = au, dir
+			opts.RecoverTakes = recover
 			if !allLines {
 				opts.Lines = nLines
+				if nLines == 0 {
+					opts.Lines = -1 // no regular lines, takes only
+				}
 			}
 		}
 	}
-	data, report, err := BuildFLPFull(opts)
+	data, report, err := flp.BuildFLPFull(opts)
 	if err != nil && opts.Audio != nil { // fall back to a tempo-only project, but say so
 		audioNote = "Audio not added: " + err.Error() + "\n"
 		opts.Audio, report = nil, ""
-		data, _, err = BuildFLPFull(opts)
+		data, _, err = flp.BuildFLPFull(opts)
 	}
 	if err != nil {
 		setText(hResult, text+"\nCould not build the FLP:\n"+err.Error())
@@ -500,7 +528,7 @@ func createFLP() {
 	if startBar > 1 {
 		text += fmt.Sprintf("Song start set to bar %d: tempo events and clips were shifted %d bars earlier.\n", startBar, startBar-1)
 	}
-	text += "Project tempo set to " + formatBPM(bpm) + " BPM.\n"
+	text += "Project tempo set to " + ptx.FormatBPM(bpm) + " BPM.\n"
 	if clamped {
 		text += "(Original tempo is outside FL Studio's 10-522 BPM range, so it was limited.)\n"
 	}
@@ -513,7 +541,7 @@ func createFLP() {
 		for i, e := range events {
 			if i == 0 || e.BPM != events[i-1].BPM {
 				bar := int(e.Beats()/4) + 1
-				text += fmt.Sprintf("  bar %d -> %s BPM\n", bar, formatBPM(e.BPM))
+				text += fmt.Sprintf("  bar %d -> %s BPM\n", bar, ptx.FormatBPM(e.BPM))
 			}
 		}
 	}
@@ -584,7 +612,7 @@ func main() {
 
 	inst, _, _ := pGetModuleHandleW.Call(0)
 	cursor, _, _ := pLoadCursorW.Call(0, idcArrow)
-	className := u16("PTXTempoExtractorWnd")
+	className := u16("PTXToFLPWnd")
 	wc := wndClassEx{
 		lpfnWndProc:   syscall.NewCallback(wndProc),
 		hInstance:     inst,
@@ -595,16 +623,16 @@ func main() {
 	wc.cbSize = uint32(unsafe.Sizeof(wc))
 	if a, _, err := pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); a == 0 {
 		pMessageBoxW.Call(0, uintptr(unsafe.Pointer(u16("Could not register window class: "+err.Error()))),
-			uintptr(unsafe.Pointer(u16("PTX Tempo Extractor"))), 0x10)
+			uintptr(unsafe.Pointer(u16(appTitle()))), 0x10)
 		os.Exit(1)
 	}
 
 	hwnd, _, err := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)),
-		uintptr(unsafe.Pointer(u16("PTX Tempo Extractor"))), wsOverlappedWindow,
+		uintptr(unsafe.Pointer(u16(appTitle()))), wsOverlappedWindow,
 		cwUseDefault, cwUseDefault, uintptr(scale(680)), uintptr(scale(520)), 0, 0, inst, 0)
 	if hwnd == 0 {
 		pMessageBoxW.Call(0, uintptr(unsafe.Pointer(u16("Could not create window: "+err.Error()))),
-			uintptr(unsafe.Pointer(u16("PTX Tempo Extractor"))), 0x10)
+			uintptr(unsafe.Pointer(u16(appTitle()))), 0x10)
 		os.Exit(1)
 	}
 	pShowWindow.Call(hwnd, swShow)
