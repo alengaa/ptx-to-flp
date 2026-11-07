@@ -4,7 +4,7 @@ A small, free Windows program that converts a **Pro Tools session (`.ptx`)**
 into an **FL Studio project (`.flp`)**. No installation, no Python: a single
 `.exe` with a simple window.
 
-> **Alpha** (`0.1.0-alpha.1`). Always check the result in FL Studio. Tested with FL Studio 26.
+> **Alpha** (`0.1.0-alpha.9`). Always check the result in FL Studio. Tested with FL Studio 26.
 
 ## What it converts
 
@@ -33,7 +33,10 @@ into an **FL Studio project (`.flp`)**. No installation, no Python: a single
 ## Usage
 
 1. Download `ptx-to-flp_v<version>_windows_amd64.exe` from the [Releases](../../releases) page.
-2. Run it, then pick (or drag in) your `.ptx` file.
+2. Run it, then **Select .ptx file** or **Select project folder** (or drop either on the window).
+   - *.ptx file*: limited, only what the `.ptx` contains.
+   - *Project folder*: also finds the `Audio Files` folder, warns about WAVs the
+     `.ptx` does not know, and can place them from their recording time.
 3. **Extract tempo** shows the BPM and any tempo automation.
 4. Set *Song starts at bar* and the number of audio lines (or *All lines*).
 5. **Create FLP...**, choose where to save. The `Audio Files` folder next to
@@ -48,7 +51,7 @@ Requires Go 1.24+. No third-party modules.
 
 ```sh
 make test
-make windows VERSION=0.1.0-alpha.1   # -> dist/ptx-to-flp_v0.1.0-alpha.1_windows_amd64.exe
+make windows VERSION=0.1.0-alpha.9   # -> dist/ptx-to-flp_v0.1.0-alpha.9_windows_amd64.exe
 ```
 
 On other systems a command-line stand-in is built for testing:

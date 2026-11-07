@@ -203,7 +203,13 @@ type BuildOptions struct {
 	// RecoverTakes also places the session's unplaced regions (see ptx.PTXAudio.Unplaced) on
 	// extra lines below the regular audio, at their stored positions. Best guess only.
 	RecoverTakes bool
+	// AddDiskTakes also places audio files found on disk that the session does not register
+	// (ptx.PTXAudio.DiskTakes), at their recording timestamp.
+	AddDiskTakes bool
 }
+
+// flItemMuted is the playlist item flag FL Studio sets on a muted clip (seen as 0x2040).
+const flItemMuted = 0x2000
 
 type plItem struct {
 	tick       uint32
@@ -213,6 +219,7 @@ type plItem struct {
 	startMS    float32
 	endMS      float32
 	isAutoClip bool
+	muted      bool
 }
 
 // BuildFLPFull creates the project and returns it with a human-readable report.
@@ -300,8 +307,16 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 	}
 	lines = append([]ptx.AudioLine{}, lines...)
 	nRegular := len(lines)
+	var extra []ptx.AudioClip
 	if o.RecoverTakes {
-		for i, lane := range ptx.PackLanes(o.Audio.Unplaced) {
+		extra = append(extra, o.Audio.Unplaced...)
+	}
+	if o.AddDiskTakes {
+		extra = append(extra, o.Audio.DiskTakes...)
+	}
+	if len(extra) > 0 {
+		sort.SliceStable(extra, func(a, b int) bool { return extra[a].Start < extra[b].Start })
+		for i, lane := range ptx.PackLanes(extra) {
 			lines = append(lines, ptx.AudioLine{Name: fmt.Sprintf("Recovered takes %d", i+1), Clips: lane})
 		}
 	}
@@ -369,6 +384,7 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 				tick: uint32(tick), ch: id, lenTicks: uint32(endTick - tick), lane: lane,
 				startMS: float32(src / sr * 1000),
 				endMS:   float32(float64(c.SrcOffset+c.Length) / sr * 1000),
+				muted:   li >= nRegular || line.Inactive || c.Muted, // recovered takes, playlists on no track and clips muted in Pro Tools
 			})
 		}
 		fmt.Fprintf(&report, "  line %d: %s (%d clips)\n", lane, line.Name, len(line.Clips))
@@ -415,6 +431,9 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 		binary.LittleEndian.PutUint16(b[12:], uint16(500-it.lane))
 		binary.LittleEndian.PutUint32(b[24:], math.Float32bits(it.startMS))
 		binary.LittleEndian.PutUint32(b[28:], math.Float32bits(it.endMS))
+		if it.muted {
+			binary.LittleEndian.PutUint16(b[18:], binary.LittleEndian.Uint16(b[18:])|flItemMuted)
+		}
 		plData = append(plData, b...)
 	}
 	pi := indexOfID(evs, 233, 0)
@@ -433,8 +452,8 @@ func BuildFLPFull(o BuildOptions) ([]byte, string, error) {
 		binary.LittleEndian.PutUint32(evs[ti].data, uint32(math.Round(bpm*1000)))
 	}
 
-	if o.RecoverTakes {
-		fmt.Fprintf(&report, "  Recovered %d unplaced takes on %d extra lines (best-guess positions)\n", len(o.Audio.Unplaced), len(lines)-nRegular)
+	if len(extra) > 0 {
+		fmt.Fprintf(&report, "  Recovered %d takes on %d extra lines (best-guess positions)\n", len(extra), len(lines)-nRegular)
 	}
 	fmt.Fprintf(&report, "  %d audio clips on %d lines, %d sample channels\n", len(items), len(lines), len(chanOrder))
 	if skippedEarly > 0 {

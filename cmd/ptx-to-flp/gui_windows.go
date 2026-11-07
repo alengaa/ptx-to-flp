@@ -23,6 +23,7 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
+	ole32    = syscall.NewLazyDLL("ole32.dll")
 
 	pRegisterClassExW     = user32.NewProc("RegisterClassExW")
 	pCreateWindowExW      = user32.NewProc("CreateWindowExW")
@@ -62,6 +63,9 @@ var (
 	pInitCommonControlsEx = syscall.NewLazyDLL("comctl32.dll").NewProc("InitCommonControlsEx")
 	pSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
 	pSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
+	pOleInitialize        = ole32.NewProc("OleInitialize")
+	pCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
+	pCoCreateInstance     = ole32.NewProc("CoCreateInstance")
 	pDragAcceptFiles      = shell32.NewProc("DragAcceptFiles")
 	pDragQueryFileW       = shell32.NewProc("DragQueryFileW")
 	pDragFinish           = shell32.NewProc("DragFinish")
@@ -119,6 +123,9 @@ const (
 	idLines   = 106
 	idAll     = 107
 	idRecover = 108
+	idFolder  = 109
+	idFades   = 110
+	idDisk    = 111
 )
 
 type point struct{ x, y int32 }
@@ -177,9 +184,9 @@ type openFileName struct {
 }
 
 var (
-	hMain, hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hUp, hAll, hRecover, hResult uintptr
-	uiFont, monoFont                                                                                              uintptr
-	dpi                                                                                                           = 96
+	hMain, hEdit, hBar, hLines, hResult uintptr
+	uiFont, monoFont                    uintptr
+	dpi                                 = 96
 )
 
 func scale(v int) int { return v * dpi / 96 }
@@ -204,80 +211,6 @@ func createChild(class, text string, style, exStyle uint32, id int) uintptr {
 }
 
 func setFont(h, f uintptr) { pSendMessageW.Call(h, wmSetFont, f, 1) }
-
-func createControls(hwnd uintptr) {
-	hMain = hwnd
-	uiFont = makeFont("Segoe UI", 9, 400)
-	monoFont = makeFont("Consolas", 10, 400)
-
-	hLabel = createChild("STATIC", "Pro Tools session file (.ptx):", 0, 0, 0)
-	hEdit = createChild("EDIT", "", wsTabStop|esAutoHScroll, wsExClientEdge, idEdit)
-	hBrowse = createChild("BUTTON", "Browse...", wsTabStop|bsPushButton, 0, idBrowse)
-	hExtract = createChild("BUTTON", "Extract tempo", wsTabStop|bsDefPush, 0, idExtract)
-	hFlp = createChild("BUTTON", "Create FLP...", wsTabStop|bsPushButton, 0, idFlp)
-	hBarLbl = createChild("STATIC", "Song starts at bar:", 0, 0, 0)
-	hBar = createChild("EDIT", "1", wsTabStop|esAutoHScroll|esNumber, wsExClientEdge, idBar)
-	hLinesLbl = createChild("STATIC", "Audio lines (0 = none):", 0, 0, 0)
-	hLines = createChild("EDIT", "2", wsTabStop|esAutoHScroll|esNumber, wsExClientEdge, idLines)
-	hAll = createChild("BUTTON", "All lines", wsTabStop|bsCheckbox, 0, idAll)
-	hRecover = createChild("BUTTON", "Also recover unplaced takes (best guess)", wsTabStop|bsCheckbox, 0, idRecover)
-	initCommonControls()
-	hUp = createChild("msctls_updown32", "", 0x0002|0x0004|0x0020|0x0080, 0, 0) // buddy int, align right, arrow keys, no thousands
-	if hUp != 0 {
-		pSendMessageW.Call(hUp, 0x046F, 0, 999) // UDM_SETRANGE32
-		pSendMessageW.Call(hUp, 0x0469, hLines, 0)
-		pSendMessageW.Call(hUp, 0x0471, 0, 2) // UDM_SETPOS32
-	}
-	hResult = createChild("EDIT", "", wsTabStop|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, wsExClientEdge, idResult)
-
-	for _, h := range []uintptr{hLabel, hEdit, hBrowse, hExtract, hFlp, hBarLbl, hBar, hLinesLbl, hLines, hAll, hRecover} {
-		setFont(h, uiFont)
-	}
-	setFont(hResult, monoFont)
-	pSendMessageW.Call(hResult, 0x00C5, 0, 0) // EM_LIMITTEXT: lift the 32K default so long tempo maps fit
-	pDragAcceptFiles.Call(hwnd, 1)
-}
-
-func layout() {
-	if hEdit == 0 || hResult == 0 {
-		return
-	}
-	var rc rect
-	pGetClientRect.Call(hMain, uintptr(unsafe.Pointer(&rc)))
-	w, h := int(rc.right), int(rc.bottom)
-	m := scale(12)
-	rowH := scale(26)
-	btnW := scale(96)
-	y := m
-	move := func(hw uintptr, x, y, cw, ch int) {
-		pMoveWindow.Call(hw, uintptr(x), uintptr(y), uintptr(cw), uintptr(ch), 1)
-	}
-	move(hLabel, m, y, w-2*m, scale(18))
-	y += scale(22)
-	move(hEdit, m, y, w-3*m-btnW, rowH)
-	move(hBrowse, w-m-btnW, y, btnW, rowH)
-	y += rowH + scale(10)
-	move(hExtract, m, y, scale(140), scale(30))
-	move(hFlp, m+scale(140)+scale(8), y, scale(140), scale(30))
-	bx := m + 2*scale(140) + scale(24)
-	move(hBarLbl, bx, y+scale(6), scale(120), scale(20))
-	move(hBar, bx+scale(124), y+scale(2), scale(60), scale(26))
-	y += scale(30) + scale(10)
-	move(hLinesLbl, m, y+scale(5), scale(150), scale(20))
-	move(hLines, m+scale(154), y+scale(1), scale(60), scale(26))
-	if hUp != 0 {
-		pSendMessageW.Call(hUp, 0x0469, hLines, 0) // re-attach so the arrows follow the box
-	}
-	move(hAll, m+scale(154)+scale(60)+scale(24), y+scale(3), scale(110), scale(24))
-	y += scale(26) + scale(6)
-	move(hRecover, m, y, scale(340), scale(24))
-	y += scale(24) + scale(10)
-	rh := h - y - m
-	if rh < scale(40) {
-		rh = scale(40)
-	}
-	move(hResult, m, y, w-2*m, rh)
-}
 
 func getText(h uintptr) string {
 	n, _, _ := pGetWindowTextLengthW.Call(h)
@@ -310,29 +243,86 @@ func browse() {
 	}
 }
 
-func runExtract(path string) (out string) {
+func browseFolder() {
+	if p := pickFolder("Select the Pro Tools project folder (the one that contains the .ptx):"); p != "" {
+		delete(chosenPTX, p) // a new pick asks again if the folder holds several .ptx
+		setText(hEdit, p)
+		extract()
+	}
+}
+
+func isFolder(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
+
+func checked(h uintptr) bool {
+	c, _, _ := pSendMessageW.Call(h, bmGetCheck, 0, 0)
+	return c == 1
+}
+
+// source is the resolved input: a .ptx file, or a project folder and the .ptx found in it.
+type source struct {
+	ptxPath string
+	folder  string // project folder, "" in .ptx-file mode
+	note    string
+}
+
+func resolveSource(p string) (source, error) {
+	p = strings.Trim(strings.TrimSpace(p), "\"")
+	if p == "" {
+		return source{}, fmt.Errorf("Choose a .ptx file or a project folder first.")
+	}
+	ptxPath, n, err := ptx.ResolveSessionInput(p)
+	if err != nil {
+		return source{}, err
+	}
+	picked := false
+	if c, ok := chosenPTX[p]; ok && isFolder(p) {
+		if _, e := os.Stat(filepath.Join(p, c)); e == nil {
+			ptxPath, picked = filepath.Join(p, c), true
+		}
+	}
+	s := source{ptxPath: ptxPath}
+	if isFolder(p) {
+		s.folder = p
+		s.note = "Project folder mode: using " + filepath.Base(ptxPath)
+		if picked {
+			s.note += fmt.Sprintf(" (your choice of %d .ptx files)", n)
+		} else if n > 1 {
+			s.note += fmt.Sprintf(" (the most recently saved of %d .ptx files)", n)
+		}
+		s.note += "\n\n"
+	} else {
+		s.note = ".ptx file mode (limited: only what the .ptx itself contains)\n\n"
+	}
+	return s, nil
+}
+
+func runExtract(src source) (out string) {
 	defer func() {
 		if r := recover(); r != nil {
 			out = fmt.Sprintf("Unexpected error: %v", r)
 		}
 	}()
-	path = strings.Trim(strings.TrimSpace(path), "\"")
-	if path == "" {
-		return "Choose a .ptx file first."
-	}
-	res, err := ptx.ExtractTempo(path)
+	res, err := ptx.ExtractTempo(src.ptxPath)
 	if err != nil {
 		return "Could not read the file:\n" + err.Error()
 	}
-	return res.Format()
+	return src.note + res.Format()
 }
 
 func extract() {
+	ensureChoice(getText(hEdit))
 	setText(hResult, "Reading...")
-	out := runExtract(getText(hEdit))
-	if p := strings.Trim(strings.TrimSpace(getText(hEdit)), "\""); p != "" && !strings.HasPrefix(out, "Could not") {
-		n, all := audioLineSetting()
-		out += audioSummary(p, n, all, recoverChecked())
+	src, err := resolveSource(getText(hEdit))
+	if err != nil {
+		setText(hResult, "Could not read the file:\n"+err.Error())
+		return
+	}
+	out := runExtract(src)
+	if !strings.HasPrefix(out, "Could not") && !strings.HasPrefix(out, "Unexpected") {
+		out += audioSummary(src, readUI())
 	}
 	setText(hResult, out)
 }
@@ -358,66 +348,189 @@ type browseInfo struct {
 
 // pickFolder shows the standard folder picker; it returns "" when cancelled.
 func pickFolder(title string) string {
-	name := make([]uint16, 520)
-	bi := browseInfo{hwndOwner: hMain, pszDisplayName: &name[0], lpszTitle: u16(title), ulFlags: 0x1 | 0x40}
-	pidl, _, _ := pSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&bi)))
-	if pidl == 0 {
-		return ""
+	if p, ok := pickFolderModern(title); ok {
+		return p
 	}
-	buf := make([]uint16, 520)
-	ok, _, _ := pSHGetPathFromIDListW.Call(pidl, uintptr(unsafe.Pointer(&buf[0])))
-	if ok == 0 {
-		return ""
-	}
-	return syscall.UTF16ToString(buf)
+	return pickFolderLegacy(title)
 }
 
-// audioLineSetting returns how many audio lines to copy: (n, all).
-func audioLineSetting() (int, bool) {
-	if c, _, _ := pSendMessageW.Call(hAll, bmGetCheck, 0, 0); c == 1 {
-		return 0, true
+type guid struct {
+	d1 uint32
+	d2 uint16
+	d3 uint16
+	d4 [8]byte
+}
+
+var (
+	clsidFileOpenDialog = guid{0xDC1C5A9C, 0xE88A, 0x4DDE, [8]byte{0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7}}
+	iidFileOpenDialog   = guid{0xD57C7288, 0xD4AD, 0x4768, [8]byte{0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60}}
+)
+
+// vcall calls method number idx of the COM object obj.
+func vcall(obj uintptr, idx int, args ...uintptr) uintptr {
+	vt := *(*uintptr)(unsafe.Pointer(obj))
+	fn := *(*uintptr)(unsafe.Pointer(vt + uintptr(idx)*unsafe.Sizeof(uintptr(0))))
+	r, _, _ := syscall.SyscallN(fn, append([]uintptr{obj}, args...)...)
+	return r
+}
+
+// pickFolderModern shows the same Explorer-style dialog as the .ptx picker, in folder mode.
+// ok is false when the dialog could not be created (the caller then uses the legacy tree).
+func pickFolderModern(title string) (path string, ok bool) {
+	pOleInitialize.Call(0)
+	var dlg uintptr
+	hr, _, _ := pCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidFileOpenDialog)), 0, 1,
+		uintptr(unsafe.Pointer(&iidFileOpenDialog)), uintptr(unsafe.Pointer(&dlg)))
+	if int32(hr) < 0 || dlg == 0 {
+		return "", false
+	}
+	defer vcall(dlg, 2) // Release
+	var opts uint32
+	vcall(dlg, 10, uintptr(unsafe.Pointer(&opts)))      // GetOptions
+	vcall(dlg, 9, uintptr(opts|0x20|0x40))              // SetOptions: FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
+	vcall(dlg, 17, uintptr(unsafe.Pointer(u16(title)))) // SetTitle
+	if r := vcall(dlg, 3, hMain); int32(r) < 0 {        // Show
+		return "", int32(r) == -2147023673 // 0x800704C7: cancelled, still handled
+	}
+	var item uintptr
+	if int32(vcall(dlg, 20, uintptr(unsafe.Pointer(&item)))) < 0 || item == 0 { // GetResult
+		return "", true
+	}
+	defer vcall(item, 2)
+	var pw uintptr
+	if int32(vcall(item, 5, 0x80058000, uintptr(unsafe.Pointer(&pw)))) < 0 || pw == 0 { // GetDisplayName(FILESYSPATH)
+		return "", true
+	}
+	defer pCoTaskMemFree.Call(pw)
+	var out []uint16
+	for p := pw; ; p += 2 {
+		c := *(*uint16)(unsafe.Pointer(p))
+		if c == 0 {
+			break
+		}
+		out = append(out, c)
+	}
+	return syscall.UTF16ToString(out), true
+}
+
+// pickFolderLegacy is the fallback when the folder dialog cannot be created: the regular
+// file-open window. Open the project folder (the .ptx files show) and click Open.
+func pickFolderLegacy(title string) string {
+	const ofnNoValidate = 0x100
+	file := utf16.Encode([]rune("Select this folder"))
+	buf := make([]uint16, 32768)
+	copy(buf, file)
+	filter := utf16.Encode([]rune("Pro Tools sessions (*.ptx)\x00*.ptx\x00\x00"))
+	ofn := openFileName{
+		hwndOwner:   hMain,
+		lpstrFilter: &filter[0],
+		lpstrFile:   &buf[0],
+		nMaxFile:    uint32(len(buf)),
+		lpstrTitle:  u16("Open the project folder (the one with the .ptx), then click Open"),
+		flags:       ofnPathMust | ofnHideRO | ofnExplorer | ofnNoValidate,
+	}
+	ofn.lStructSize = uint32(unsafe.Sizeof(ofn))
+	if ok, _, _ := pGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn))); ok == 0 {
+		return ""
+	}
+	p := syscall.UTF16ToString(buf)
+	if !isFolder(p) {
+		p = filepath.Dir(p)
+	}
+	return p
+}
+
+// chosenPTX remembers which .ptx the user picked for a project folder that holds several.
+var chosenPTX = map[string]string{}
+
+// choosePTX asks which .ptx to use when the folder holds more than one.
+func choosePTX(folder string, files []string) string {
+	buf := make([]uint16, 32768)
+	filter := utf16.Encode([]rune("Pro Tools sessions\x00" + strings.Join(files, ";") + "\x00\x00"))
+	ofn := openFileName{
+		hwndOwner:       hMain,
+		lpstrFilter:     &filter[0],
+		lpstrFile:       &buf[0],
+		nMaxFile:        uint32(len(buf)),
+		lpstrInitialDir: u16(folder),
+		lpstrTitle:      u16("Which PTX project would you like to use?"),
+		flags:           ofnPathMust | ofnFileMust | ofnHideRO | ofnExplorer,
+	}
+	ofn.lStructSize = uint32(unsafe.Sizeof(ofn))
+	if ok, _, _ := pGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn))); ok == 0 {
+		return ""
+	}
+	got := syscall.UTF16ToString(buf)
+	if !strings.EqualFold(filepath.Dir(got), filepath.Clean(folder)) {
+		return ""
+	}
+	return filepath.Base(got)
+}
+
+// ensureChoice asks once per folder which .ptx to use when there are several.
+func ensureChoice(p string) {
+	p = strings.Trim(strings.TrimSpace(p), "\"")
+	if !isFolder(p) {
+		return
+	}
+	files, err := ptx.ListSessionFiles(p)
+	if err != nil || len(files) < 2 {
+		return
+	}
+	if c, ok := chosenPTX[p]; ok {
+		for _, f := range files {
+			if f == c {
+				return
+			}
+		}
+	}
+	if c := choosePTX(p, files); c != "" {
+		chosenPTX[p] = c
+	}
+}
+
+// uiOpts are the audio settings currently shown in the window.
+type uiOpts struct {
+	lines   int // lines to copy when !all
+	all     bool
+	recover bool // regions in the clip list that are on no playlist
+	fades   bool
+	disk    bool // WAVs on disk the .ptx does not know (project folder mode)
+}
+
+func readUI() uiOpts {
+	u := uiOpts{recover: cfg.recoverTakes, fades: cfg.fades, disk: cfg.disk}
+	if cfg.all {
+		u.all = true
+		return u
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(getText(hLines)))
 	if err != nil || n < 0 {
 		n = 2
 	}
-	return n, false
+	u.lines = n
+	return u
 }
 
-func recoverChecked() bool {
-	c, _, _ := pSendMessageW.Call(hRecover, bmGetCheck, 0, 0)
-	return c == 1
-}
-
-func setLinesEnabled() {
-	on := uintptr(1)
-	if c, _, _ := pSendMessageW.Call(hAll, bmGetCheck, 0, 0); c == 1 {
-		on = 0
-	}
-	pEnableWindow.Call(hLines, on)
-	if hUp != 0 {
-		pEnableWindow.Call(hUp, on)
-	}
-}
-
-// audioSummary lists the audio lines that would be copied.
-func audioSummary(path string, n int, all, recover bool) string {
-	if n == 0 && !all && !recover {
+// audioSummary lists what the audio options would copy.
+func audioSummary(src source, u uiOpts) string {
+	diskOn := u.disk && src.folder != ""
+	if u.lines == 0 && !u.all && !u.recover && !diskOn && src.folder == "" {
 		return ""
 	}
-	au, err := ptx.ReadPTXAudio(path)
-	if err != nil {
+	au, err := ptx.ReadPTXAudioOpts(src.ptxPath, ptx.ReadOptions{IncludeFades: u.fades})
+	if err != nil && (au == nil || src.folder == "") {
 		return "\nAudio: " + err.Error() + "\n"
 	}
+	var sb strings.Builder
 	lines := au.Lines
-	if !all && n < len(lines) {
-		lines = lines[:n]
+	if !u.all && u.lines < len(lines) {
+		lines = lines[:u.lines]
 	}
-	if n == 0 && !all {
+	if u.lines == 0 && !u.all {
 		lines = nil
 	}
-	var sb strings.Builder
-	if len(lines) > 0 || len(au.Unplaced) == 0 {
+	if len(lines) > 0 || (len(au.Unplaced) == 0 && !diskOn) {
 		fmt.Fprintf(&sb, "\nAudio lines with clips: %d found in the session, %d selected\n", len(au.Lines), len(lines))
 	} else {
 		sb.WriteString("\n")
@@ -427,24 +540,37 @@ func audioSummary(path string, n int, all, recover bool) string {
 		fmt.Fprintf(&sb, "  line %d: %s  (%d clips, first at %s)\n", i+1, l.Name, len(l.Clips), ptx.FormatClock(first))
 	}
 	if len(au.Unplaced) > 0 {
-		fmt.Fprintf(&sb, "Unplaced takes in the clip list (not on the timeline): %d, would use %d extra lines if recovered\n",
+		fmt.Fprintf(&sb, "Takes in the clip list but on no timeline: %d, would use %d extra lines if recovered\n",
 			len(au.Unplaced), len(ptx.PackLanes(au.Unplaced)))
+	}
+	if src.folder != "" {
+		dir, how := ptx.FindSessionAudioDir(src.folder)
+		if dir == "" {
+			sb.WriteString("Audio Files folder not found in the project folder: you will be asked for it when creating the FLP.\n")
+		} else if sc, e := ptx.ScanAudioDir(dir, au); e == nil {
+			fmt.Fprintf(&sb, "Audio found in the %s: %d WAV files\n", how, sc.OnDisk)
+			if n := len(sc.NotRegistered); n > 0 {
+				fmt.Fprintf(&sb, "WARNING: %d WAV files there are not in this .ptx (it may be an older save).\n", n)
+				sb.WriteString("  Tick the last checkbox to place them from their recording time.\n")
+			}
+		}
 	}
 	return sb.String()
 }
 
 func createFLP() {
-	path := strings.Trim(strings.TrimSpace(getText(hEdit)), "\"")
-	if path == "" {
-		setText(hResult, "Choose a .ptx file first.")
+	src, err := resolveSource(getText(hEdit))
+	if err != nil {
+		setText(hResult, err.Error())
 		return
 	}
+	path := src.ptxPath
 	res, err := ptx.ExtractTempo(path)
 	if err != nil {
 		setText(hResult, "Could not read the file:\n"+err.Error())
 		return
 	}
-	text := res.Format()
+	text := src.note + res.Format()
 	if len(res.Events) == 0 {
 		setText(hResult, text+"\nNo FLP created.")
 		return
@@ -488,31 +614,63 @@ func createFLP() {
 	// audio (optional)
 	opts := flp.BuildOptions{Events: res.Events, StartBar: startBar}
 	audioNote := ""
-	nLines, allLines := audioLineSetting()
-	recover := recoverChecked()
-	if nLines > 0 || allLines || recover {
-		dir := filepath.Join(filepath.Dir(path), "Audio Files")
-		if st, e := os.Stat(dir); e != nil || !st.IsDir() {
-			dir = pickFolder("Audio Files folder not found next to the .ptx. Select the session's Audio Files folder:")
-		}
-		if dir == "" {
-			audioNote = "Audio not added: no Audio Files folder selected.\n"
-		} else if au, e := ptx.ReadPTXAudio(path); e != nil {
-			audioNote = "Audio not added: " + e.Error() + "\n"
+	u := readUI()
+	diskOn := u.disk && src.folder != ""
+	if u.lines > 0 || u.all || u.recover || diskOn {
+		var dir string
+		if src.folder != "" {
+			var how string
+			dir, how = ptx.FindSessionAudioDir(src.folder)
+			if dir == "" {
+				dir = pickFolder("Audio Files not found. Select the session's Audio Files folder:")
+			} else {
+				audioNote += "Audio read from the " + how + ".\n"
+			}
 		} else {
+			dir = filepath.Join(filepath.Dir(path), "Audio Files")
+			if st, e := os.Stat(dir); e != nil || !st.IsDir() {
+				dir = pickFolder("Audio Files folder not found next to the .ptx. Select the session's Audio Files folder:")
+			}
+		}
+		au, e := ptx.ReadPTXAudioOpts(path, ptx.ReadOptions{IncludeFades: u.fades})
+		switch {
+		case dir == "":
+			audioNote += "Audio not added: no Audio Files folder selected.\n"
+		case e != nil && (au == nil || !diskOn):
+			audioNote += "Audio not added: " + e.Error() + "\n"
+		default:
 			opts.Audio, opts.AudioDir = au, dir
-			opts.RecoverTakes = recover
-			if !allLines {
-				opts.Lines = nLines
-				if nLines == 0 {
-					opts.Lines = -1 // no regular lines, takes only
+			opts.RecoverTakes = u.recover
+			if !u.all {
+				opts.Lines = u.lines
+				if u.lines == 0 {
+					opts.Lines = -1 // no regular lines, extra takes only
+				}
+			}
+			if diskOn {
+				added, skipped, e := ptx.AddDiskTakes(au, dir)
+				if e != nil {
+					audioNote += "WAVs not in the .ptx could not be scanned: " + e.Error() + "\n"
+				} else {
+					opts.AddDiskTakes = true
+					audioNote += fmt.Sprintf("%d WAV files not in the .ptx were added from their recording time.\n", added)
+					if len(skipped) > 0 {
+						audioNote += fmt.Sprintf("%d WAV files could not be placed (skipped):\n", len(skipped))
+						for i, s := range skipped {
+							if i == 20 {
+								audioNote += fmt.Sprintf("  ... and %d more\n", len(skipped)-20)
+								break
+							}
+							audioNote += "  " + s.Name + ": " + s.Reason + "\n"
+						}
+					}
 				}
 			}
 		}
 	}
 	data, report, err := flp.BuildFLPFull(opts)
 	if err != nil && opts.Audio != nil { // fall back to a tempo-only project, but say so
-		audioNote = "Audio not added: " + err.Error() + "\n"
+		audioNote += "Audio not added: " + err.Error() + "\n"
 		opts.Audio, report = nil, ""
 		data, _, err = flp.BuildFLPFull(opts)
 	}
@@ -553,6 +711,9 @@ func createFLP() {
 	}
 	text += audioNote
 	setText(hResult, text)
+	if cfg.openDone {
+		openInExplorer(out)
+	}
 }
 
 func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
@@ -563,20 +724,6 @@ func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 	case wmSize:
 		layout()
 		return 0
-	case wmCommand:
-		if (wparam>>16)&0xffff == bnClicked {
-			switch wparam & 0xffff {
-			case idBrowse:
-				browse()
-			case idExtract, 1: // 1 = IDOK (Enter pressed in the path field)
-				extract()
-			case idFlp:
-				createFLP()
-			case idAll:
-				setLinesEnabled()
-			}
-		}
-		return 0
 	case wmDropFiles:
 		buf := make([]uint16, 32768)
 		n, _, _ := pDragQueryFileW.Call(wparam, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
@@ -586,15 +733,12 @@ func wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 			extract()
 		}
 		return 0
-	case wmCtlColorStatic:
-		if lparam == hResult && hResult != 0 { // keep the read-only results box white
-			pSetBkColor.Call(wparam, 0xFFFFFF)
-			b, _, _ := pGetStockObject.Call(whiteBrush)
-			return b
-		}
 	case wmDestroy:
 		pPostQuitMessage.Call(0)
 		return 0
+	}
+	if r, handled := themeMainProc(hwnd, msg, wparam, lparam); handled {
+		return r
 	}
 	r, _, _ := pDefWindowProcW.Call(hwnd, msg, wparam, lparam)
 	return r
@@ -617,7 +761,7 @@ func main() {
 		lpfnWndProc:   syscall.NewCallback(wndProc),
 		hInstance:     inst,
 		hCursor:       cursor,
-		hbrBackground: color3DFace + 1,
+		hbrBackground: 0,
 		lpszClassName: className,
 	}
 	wc.cbSize = uint32(unsafe.Sizeof(wc))
@@ -629,12 +773,13 @@ func main() {
 
 	hwnd, _, err := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(u16(appTitle()))), wsOverlappedWindow,
-		cwUseDefault, cwUseDefault, uintptr(scale(680)), uintptr(scale(520)), 0, 0, inst, 0)
+		cwUseDefault, cwUseDefault, uintptr(scale(780)), uintptr(scale(720)), 0, 0, inst, 0)
 	if hwnd == 0 {
 		pMessageBoxW.Call(0, uintptr(unsafe.Pointer(u16("Could not create window: "+err.Error()))),
 			uintptr(unsafe.Pointer(u16(appTitle()))), 0x10)
 		os.Exit(1)
 	}
+	darkTitleBar(hwnd)
 	pShowWindow.Call(hwnd, swShow)
 	pUpdateWindow.Call(hwnd)
 
@@ -651,6 +796,12 @@ func main() {
 		r, _, _ := pGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
 		if int32(r) <= 0 {
 			break
+		}
+		if m.message == 0x0100 && m.wParam == 0x0D { // Enter in the path field reads the session
+			if f, _, _ := pGetFocus.Call(); f == hEdit {
+				extract()
+				continue
+			}
 		}
 		if d, _, _ := pIsDialogMessageW.Call(hwnd, uintptr(unsafe.Pointer(&m))); d != 0 {
 			continue

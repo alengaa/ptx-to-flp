@@ -15,6 +15,10 @@ incomplete or wrong; corrections welcome.
   `0x1008`/`0x2629`; name at +11, then (source offset, length, start) in samples.
 - Playlists: `0x1054` > `0x1052` (one per mono channel) > `0x1050` > `0x104F`
   (region index at +4, start at +5, kind at +13; `0x03` = timeline clip).
+- Placement kind byte (`0x104F` +13): 1, 2 and 3 are all real timeline clips.
+  `0x1050` of size 48 has a fade flag at byte 46 (1 = fade piece).
+- Broadcast WAV `bext` chunk: `TimeReference` (u64 at offset 338 of the chunk) is the
+  sample position where Pro Tools recorded the file, equal to the region start.
 - Session timecode origin: block `0x204D`, frame-rate code at +2, start frame
   at +11 (code `0x02` = 25 fps). Region starts include this origin.
 - A region in the clip list is not necessarily on a playlist; deleted takes

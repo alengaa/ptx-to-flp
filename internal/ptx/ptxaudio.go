@@ -136,6 +136,9 @@ type AudioClip struct {
 	Start      int64  // timeline start, samples from session start
 	Length     int64  // samples
 	SrcOffset  int64  // samples trimmed from the start of the source file
+	Muted      bool   // clip is muted in Pro Tools (flag byte of the placement reference)
+	Fade       bool   // placement flagged as a fade piece (only read with IncludeFades)
+	Kind       byte   // placement kind byte (1, 2 or 3); kind 2 clips sit under their neighbours
 }
 
 // AudioLine is one Pro Tools playlist line (one mono channel) holding clips.
@@ -143,6 +146,9 @@ type AudioLine struct {
 	Name    string
 	Channel int // 0 = left/first channel of the track, 1 = right
 	Clips   []AudioClip
+	// Inactive: the line is a playlist that is not on any track of the session, so Pro Tools
+	// does not play it (its clips are the ones that appear muted / not in use).
+	Inactive bool
 }
 
 // PTXAudio is everything the FLP builder needs from the PTX.
@@ -156,6 +162,11 @@ type PTXAudio struct {
 	// deleted from the timeline) with the position stored in the region itself. The position
 	// is a best guess of where the take was recorded, not a placement.
 	Unplaced []AudioClip
+	// DiskTakes are audio files in the session's audio folder that the session does not
+	// register at all (see AddDiskTakes), positioned from their recording timestamp.
+	DiskTakes []AudioClip
+	// RegisteredFiles are all media file names the session registers.
+	RegisteredFiles []string
 	// OriginSamples is the session timecode origin (e.g. 01:00:00:00) that region starts include.
 	OriginSamples int64
 }
@@ -165,11 +176,27 @@ type PTXAudio struct {
 // sorted by Start. Hidden parts are cut away (a clip can be split in two).
 func resolveOverlaps(clips []AudioClip, sr int) ([]AudioClip, int) {
 	minLen := int64(sr) / 500 // ignore slivers under 2 ms
+	// Which clip is on top where two overlap: kind 2 placements sit underneath their
+	// neighbours (verified on a real session: a kind 1 clip keeps its full length over a
+	// kind 2 clip that starts inside it, and a kind 3 clip cuts a kind 2 clip's tail). Between
+	// equal ranks the later start wins.
+	rank := func(c AudioClip) int {
+		if c.Kind == 2 {
+			return 0
+		}
+		return 1
+	}
 	var out []AudioClip
 	changed := 0
 	for i, c := range clips {
 		pieces := [][2]int64{{c.Start, c.Start + c.Length}}
-		for _, o := range clips[i+1:] {
+		for j, o := range clips {
+			if j == i {
+				continue
+			}
+			if rank(o) < rank(c) || (rank(o) == rank(c) && j < i) {
+				continue // c stays on top of o
+			}
 			os, oe := o.Start, o.Start+o.Length
 			var next [][2]int64
 			for _, p := range pieces {
@@ -203,6 +230,7 @@ func resolveOverlaps(clips []AudioClip, sr int) ([]AudioClip, int) {
 			out = append(out, n)
 		}
 	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Start < out[b].Start })
 	return out, changed
 }
 
@@ -368,8 +396,18 @@ func sessionOriginSamples(d []byte, top []*pblock, sr int) int64 {
 	return frames * int64(sr) / 25
 }
 
+// ReadOptions tunes how placements are read.
+type ReadOptions struct {
+	// IncludeFades also reads placements the session flags as fade pieces. They are skipped
+	// by default because libptformat and PTX2RPP both treat the flag as "not a clip".
+	IncludeFades bool
+}
+
 // ReadPTXAudio extracts the audio lines (mono channels) that hold active clips.
-func ReadPTXAudio(path string) (*PTXAudio, error) {
+func ReadPTXAudio(path string) (*PTXAudio, error) { return ReadPTXAudioOpts(path, ReadOptions{}) }
+
+// ReadPTXAudioOpts is ReadPTXAudio with options.
+func ReadPTXAudioOpts(path string, opt ReadOptions) (*PTXAudio, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -380,7 +418,9 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 	}
 	top := findTopBlocks(d)
 	res := &PTXAudio{SampleRate: sessionSampleRate(d, top)}
+	res.OriginSamples = sessionOriginSamples(d, top, res.SampleRate)
 	files := extractAudioFileList(d, top)
+	res.RegisteredFiles = files
 	defs := extractAudioTrackDefs(d, top)
 	regs := extractRegionDefs(d, top)
 	byIdx := map[int]ptRegion{}
@@ -421,6 +461,7 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 	usedRegion := map[int]bool{}
 	for _, m := range maps {
 		count := 0
+		var pending []AudioLine
 		for _, e := range m.kids {
 			if e.ct != 0x1052 {
 				continue
@@ -462,7 +503,14 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 					if !ok {
 						continue
 					}
-					if d[j+13] != 0x03 { // auxiliary reference, not a timeline clip
+					// The kind byte (+13) is 1, 2 or 3 for ordinary clips: kinds 1 and 2 hold real
+					// timeline clips too (verified against Pro Tools), so all are read.
+					if k := d[j+13]; k < 1 || k > 3 {
+						continue
+					}
+					// 48-byte placements carry a fade flag at byte 46.
+					isFade := pl.size == 48 && d[pl.off+46] == 0x01
+					if isFade && !opt.IncludeFades {
 						continue
 					}
 					// Older sessions mark stale references with a trailing 0x01; the newer
@@ -476,10 +524,14 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 					}
 					line.Clips = append(line.Clips, AudioClip{
 						RegionName: reg.name, File: file, Start: start,
-						Length: reg.length, SrcOffset: reg.srcOffset,
+						Length: reg.length, SrcOffset: reg.srcOffset, Kind: d[j+13], Fade: isFade, Muted: d[ref.off+2]&1 == 1,
 					})
 				}
 			}
+			pending = append(pending, line)
+		}
+		dropBackingFades(pending)
+		for _, line := range pending {
 			sort.SliceStable(line.Clips, func(a, b int) bool { return line.Clips[a].Start < line.Clips[b].Start })
 			var cut int
 			line.Clips, cut = resolveOverlaps(line.Clips, res.SampleRate)
@@ -494,7 +546,9 @@ func ReadPTXAudio(path string) (*PTXAudio, error) {
 			break // the first map with content is the real one
 		}
 	}
+	res.RegisteredFiles = files
 	res.OriginSamples = sessionOriginSamples(d, top, res.SampleRate)
+	markInactiveLines(d, top, res)
 	res.Unplaced = findUnplaced(regs, files, usedRegion, res)
 	if len(res.Lines) == 0 && len(res.Unplaced) == 0 {
 		return res, errors.New("no audio clips found on the timeline")
@@ -519,7 +573,7 @@ func findUnplaced(regs []ptRegion, files []string, used map[int]bool, res *PTXAu
 			continue
 		}
 		f := files[r.fileIndex]
-		if f == "" || placedFile[f] || r.start <= 0 {
+		if f == "" || placedFile[f] || r.start <= 0 || derivedFromPlaced(f, placedFile) {
 			continue
 		}
 		pos := r.start
@@ -597,4 +651,95 @@ func FindAudioFile(dir, registered string) string {
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
+}
+
+// activeTrackNames returns the names of the tracks that are on the session's track list
+// (0x2519 holding 0x251a entries), trimmed. nil when the session has no such list.
+func activeTrackNames(d []byte, top []*pblock) map[string]bool {
+	var names map[string]bool
+	for _, b := range findByCT(top, 0x2519) {
+		for _, k := range b.kids {
+			if k.ct != 0x251a || k.off+8 > len(d) {
+				continue
+			}
+			n, _ := readPTString(d, k.off+4)
+			if n = strings.TrimSpace(n); n != "" {
+				if names == nil {
+					names = map[string]bool{}
+				}
+				names[n] = true
+			}
+		}
+	}
+	return names
+}
+
+// markInactiveLines flags the lines whose playlist is on no track. When that would flag every
+// line (or the session has no track list) nothing is flagged.
+func markInactiveLines(d []byte, top []*pblock, res *PTXAudio) {
+	names := activeTrackNames(d, top)
+	if names == nil {
+		return
+	}
+	n := 0
+	for i := range res.Lines {
+		if !names[strings.TrimSpace(res.Lines[i].Name)] {
+			n++
+		}
+	}
+	if n == 0 || n == len(res.Lines) {
+		return
+	}
+	for i := range res.Lines {
+		res.Lines[i].Inactive = !names[strings.TrimSpace(res.Lines[i].Name)]
+	}
+}
+
+// dropBackingFades removes fade-flagged pieces of a file that is also placed as a normal clip
+// on another line. Those are pieces of the backing track (the instrumental) that Pro Tools
+// keeps under the takes, not takes themselves.
+func dropBackingFades(lines []AudioLine) {
+	normal := map[string]map[int]bool{}
+	for i, l := range lines {
+		for _, c := range l.Clips {
+			if !c.Fade {
+				if normal[c.File] == nil {
+					normal[c.File] = map[int]bool{}
+				}
+				normal[c.File][i] = true
+			}
+		}
+	}
+	for i := range lines {
+		kept := lines[i].Clips[:0]
+		for _, c := range lines[i].Clips {
+			if c.Fade {
+				if on := normal[c.File]; len(on) > 0 && !(len(on) == 1 && on[i]) {
+					continue
+				}
+			}
+			kept = append(kept, c)
+		}
+		lines[i].Clips = kept
+	}
+}
+
+// derivedFromPlaced reports whether file is a processed copy of a placed file, named after it
+// (for example "<beat>-VariFi_01.wav" next to "<beat>.wav"): those are renders of the backing
+// track, never separate takes.
+func derivedFromPlaced(file string, placed map[string]bool) bool {
+	stem := func(n string) string {
+		n = strings.TrimSpace(strings.ReplaceAll(n, "\\", "/"))
+		if i := strings.LastIndex(n, "/"); i >= 0 {
+			n = n[i+1:]
+		}
+		return strings.TrimSuffix(n, filepath.Ext(n))
+	}
+	fs := stem(file)
+	for p := range placed {
+		if ps := stem(p); p != "" && len(fs) > len(ps)+1 && strings.HasPrefix(fs, ps+"-") {
+			return true
+		}
+	}
+	return false
 }

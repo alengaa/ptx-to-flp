@@ -97,3 +97,43 @@ func TestRejectsNonPTX(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestResolveOverlapsKind2SitsUnderneath(t *testing.T) {
+	const sr = 44100
+	clips := []AudioClip{
+		{RegionName: "a", Start: 1000, Length: 4000, Kind: 1},
+		{RegionName: "b", Start: 3000, Length: 4000, Kind: 2},
+		{RegionName: "c", Start: 6000, Length: 4000, Kind: 3},
+	}
+	out, _ := resolveOverlaps(clips, sr)
+	if len(out) != 3 {
+		t.Fatalf("want 3 clips, got %d: %+v", len(out), out)
+	}
+	if out[0].Start != 1000 || out[0].Length != 4000 {
+		t.Errorf("kind 1 clip must stay whole: %+v", out[0])
+	}
+	if out[1].Start != 5000 || out[1].Length != 1000 || out[1].SrcOffset != 2000 {
+		t.Errorf("kind 2 clip must be cut by both neighbours: %+v", out[1])
+	}
+	if out[2].Start != 6000 || out[2].Length != 4000 {
+		t.Errorf("kind 3 clip must stay whole: %+v", out[2])
+	}
+}
+
+func TestDropBackingFadesAndDerivedFiles(t *testing.T) {
+	lines := []AudioLine{
+		{Name: "beat", Clips: []AudioClip{{File: "beat.wav"}}},
+		{Name: "take", Clips: []AudioClip{
+			{File: "beat.wav", Fade: true},
+			{File: "take1.wav", Fade: true},
+		}},
+	}
+	dropBackingFades(lines)
+	if len(lines[0].Clips) != 1 || len(lines[1].Clips) != 1 || lines[1].Clips[0].File != "take1.wav" {
+		t.Fatalf("unexpected result: %+v", lines)
+	}
+	placed := map[string]bool{"beat.wav": true}
+	if !derivedFromPlaced("beat-VariFi_01.wav", placed) || derivedFromPlaced("other.wav", placed) {
+		t.Fatal("derived file detection is wrong")
+	}
+}
